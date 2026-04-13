@@ -1,0 +1,53 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users/{userId}/settings
+    // Document ID: game
+    // Fields:
+    //   - students: list (required) - Array of student names
+    //   - questions: list (required) - Array of questions
+    //   - updatedAt: timestamp (optional)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidGameSettings(data) {
+      return data.students is list && 
+             data.students.size() <= 100 &&
+             data.questions is list && 
+             data.questions.size() <= 200;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+      
+      match /settings/game {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidGameSettings(request.resource.data);
+      }
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

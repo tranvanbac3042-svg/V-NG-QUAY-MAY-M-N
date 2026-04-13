@@ -1,0 +1,33 @@
+{
+  "entities": {
+    "GameSettings": {
+      "title": "Game Settings",
+      "description": "Stores the list of students and questions for the user's game.",
+      "type": "object",
+      "properties": {
+        "students": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of all students in the class."
+        },
+        "questions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "List of questions for the game."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last time the settings were updated."
+        }
+      },
+      "required": ["students", "questions"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/settings/game": {
+      "schema": "GameSettings",
+      "description": "User-specific game configuration."
+    }
+  }
+}

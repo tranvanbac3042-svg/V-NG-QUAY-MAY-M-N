@@ -1,0 +1,41 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Nunito:wght@600;800;900&display=swap');
+
+@theme {
+  --font-baloo: "Baloo 2", cursive;
+  --font-nunito: "Nunito", sans-serif;
+  
+  --color-primary: #FF6B6B;
+  --color-secondary: #4ECDC4;
+  --color-warning: #FFE66D;
+  --color-success: #95D5B2;
+  --color-accent: #9D4EDD;
+  --color-dark: #2B2D42;
+  --color-light: #F8F9FA;
+}
+
+body {
+  @apply font-nunito text-dark bg-fixed;
+  background: linear-gradient(45deg, #a8edea 0%, #fed6e3 100%);
+  background-size: 400% 400%;
+  animation: gradientBG 15s ease infinite;
+}
+
+@keyframes gradientBG {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+h1, h2, h3 {
+  @apply font-baloo;
+}
+
+.lucide-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
