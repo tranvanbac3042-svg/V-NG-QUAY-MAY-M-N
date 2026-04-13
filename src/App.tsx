@@ -3,20 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback, Component } from 'react';
-import { 
-  onAuthStateChanged, 
-  signInWithPopup, 
-  signOut, 
-  User 
-} from 'firebase/auth';
-import { 
-  doc, 
-  getDoc, 
-  setDoc, 
-  onSnapshot,
-  serverTimestamp
-} from 'firebase/firestore';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Play, 
   RotateCcw, 
@@ -36,14 +23,20 @@ import {
   LogOut,
   LogIn,
   Loader2,
-  Trophy
+  Trophy,
+  Mail,
+  Lock,
+  User as UserIcon,
+  Shield,
+  Search,
+  Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
 import * as Tone from 'tone';
 import { GoogleGenAI } from '@google/genai';
 
-import { auth, db, googleProvider } from './firebase';
+import { supabase } from './supabase';
 
 // --- Constants ---
 const COLOR_PALETTE = ['#FF9A9E', '#FECFEF', '#A1C4FD', '#C2E9FB', '#D4FC79', '#96E6A1', '#FFD194', '#E0C3FC'];
@@ -73,46 +66,9 @@ enum OperationType {
   WRITE = 'write',
 }
 
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string;
-    email?: string | null;
-    emailVerified?: boolean;
-    isAnonymous?: boolean;
-    tenantId?: string | null;
-    providerInfo: {
-      providerId: string;
-      displayName: string | null;
-      email: string | null;
-      photoUrl: string | null;
-    }[];
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+function handleSupabaseError(error: any, operationType: OperationType, path: string | null) {
+  console.error(`Supabase Error (${operationType}) at ${path}:`, error);
+  throw new Error(error.message || String(error));
 }
 
 interface GameData {
@@ -125,9 +81,23 @@ export default function App() {
 }
 
 function GameContent() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<any>(null);
+  const [userProfile, setUserProfile] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [authError, setAuthError] = useState('');
+  
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminSearch, setAdminSearch] = useState('');
+  const [totalSettings, setTotalSettings] = useState(0);
   
   const [allStudents, setAllStudents] = useState<string[]>(DEFAULT_STUDENTS);
   const [questions, setQuestions] = useState<string[]>(DEFAULT_QUESTIONS);
@@ -141,10 +111,14 @@ function GameContent() {
   const [isMuted, setIsMuted] = useState(false);
   
   const [showSettings, setShowSettings] = useState(false);
+  const [tempStudents, setTempStudents] = useState('');
+  const [tempQuestions, setTempQuestions] = useState('');
   const [activeTab, setActiveTab] = useState<'students' | 'manual' | 'ai'>('students');
   
   const [quickAdd, setQuickAdd] = useState('');
   const [isAudioStarted, setIsAudioStarted] = useState(false);
+  
+  const isSupabaseConfigured = !!import.meta.env.VITE_SUPABASE_URL && !!import.meta.env.VITE_SUPABASE_ANON_KEY;
 
   // AI State
   const [aiGrade, setAiGrade] = useState('Lớp 5');
@@ -160,50 +134,231 @@ function GameContent() {
 
   // --- Auth & Data Fetching ---
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchUserProfile(session.user.id);
+      } else {
+        setLoading(false);
+        setIsAuthReady(true);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const u = session?.user ?? null;
       setUser(u);
+      if (u) {
+        fetchUserProfile(u.id);
+      } else {
+        setUserProfile(null);
+        setIsAdmin(false);
+        setLoading(false);
+        setIsAuthReady(true);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const fetchUserProfile = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (error) throw error;
+      
+      setUserProfile(data);
+      setIsAdmin(data.role === 'admin');
+    } catch (error) {
+      console.error("Error fetching profile:", error);
+    } finally {
       setLoading(false);
       setIsAuthReady(true);
+    }
+  };
+
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setLoading(true);
+    try {
+      if (authMode === 'register') {
+        const { error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              display_name: displayName
+            }
+          }
+        });
+        if (error) throw error;
+        alert("Vui lòng kiểm tra email để xác nhận tài khoản!");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email,
+          password
+        });
+        if (error) throw error;
+      }
+    } catch (error: any) {
+      setAuthError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const signInWithGoogle = async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: window.location.origin
+      }
     });
-    return unsubscribe;
-  }, []);
+    if (error) setAuthError(error.message);
+  };
+
+  const fetchAllUsers = async () => {
+    if (!isAdmin) return;
+    setAdminLoading(true);
+    try {
+      const { data: usersData, error: usersError } = await supabase
+        .from('users')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (usersError) throw usersError;
+      setAllUsers(usersData || []);
+
+      const { count, error: countError } = await supabase
+        .from('game_settings')
+        .select('*', { count: 'exact', head: true });
+      
+      if (!countError) setTotalSettings(count || 0);
+    } catch (error) {
+      console.error("Error fetching users:", error);
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showAdmin) {
+      fetchAllUsers();
+    }
+  }, [showAdmin]);
+
+  const deleteUserGameData = async (userId: string) => {
+    if (!isAdmin) return;
+    if (!confirm("Bạn có chắc chắn muốn xóa dữ liệu trò chơi của người dùng này?")) return;
+    try {
+      const { error } = await supabase
+        .from('game_settings')
+        .delete()
+        .eq('user_id', userId);
+
+      if (error) throw error;
+      alert("Đã xóa dữ liệu thành công.");
+    } catch (error) {
+      console.error("Error deleting data:", error);
+    }
+  };
+
+  const updateUserRole = async (userId: string, newRole: string) => {
+    if (!isAdmin) return;
+    try {
+      const { error } = await supabase
+        .from('users')
+        .update({ role: newRole })
+        .eq('id', userId);
+
+      if (error) throw error;
+      
+      setAllUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u));
+      
+      if (userId === user?.id) {
+        setIsAdmin(newRole === 'admin');
+      }
+    } catch (error) {
+      console.error("Error updating role:", error);
+    }
+  };
 
   useEffect(() => {
     if (!user) return;
 
-    const docRef = doc(db, 'users', user.uid, 'settings', 'game');
-    const unsubscribe = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data() as GameData;
+    // Fetch initial data
+    const fetchGameData = async () => {
+      const { data, error } = await supabase
+        .from('game_settings')
+        .select('*')
+        .eq('user_id', user.id)
+        .single();
+
+      if (error && error.code !== 'PGRST116') { // PGRST116 is "no rows returned"
+        handleSupabaseError(error, OperationType.GET, `game_settings/${user.id}`);
+      }
+
+      if (data) {
         setAllStudents(data.students || DEFAULT_STUDENTS);
         setQuestions(data.questions || DEFAULT_QUESTIONS);
-        // Reset game if data changes significantly
         setRemainingStudents(data.students || DEFAULT_STUDENTS);
         setHistory([]);
         setSelectedStudent(null);
         setCurrentQuestion(null);
       } else {
-        // Initialize with defaults if no data exists
         saveGameData(DEFAULT_STUDENTS, DEFAULT_QUESTIONS);
       }
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, `users/${user.uid}/settings/game`);
-    });
+    };
 
-    return unsubscribe;
+    fetchGameData();
+
+    // Subscribe to changes
+    const channel = supabase
+      .channel('game_settings_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'game_settings',
+          filter: `user_id=eq.${user.id}`
+        },
+        (payload) => {
+          const data = payload.new as any;
+          if (data) {
+            setAllStudents(data.students || DEFAULT_STUDENTS);
+            setQuestions(data.questions || DEFAULT_QUESTIONS);
+            setRemainingStudents(data.students || DEFAULT_STUDENTS);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [user]);
 
   const saveGameData = async (newStudents: string[], newQuestions: string[]) => {
     if (!user) return;
-    const path = `users/${user.uid}/settings/game`;
     try {
-      await setDoc(doc(db, 'users', user.uid, 'settings', 'game'), {
-        students: newStudents,
-        questions: newQuestions,
-        updatedAt: serverTimestamp()
-      });
+      const { error } = await supabase
+        .from('game_settings')
+        .upsert({
+          user_id: user.id,
+          students: newStudents,
+          questions: newQuestions,
+          updated_at: new Date().toISOString()
+        });
+
+      if (error) throw error;
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, path);
+      handleSupabaseError(error, OperationType.WRITE, `game_settings/${user.id}`);
     }
   };
 
@@ -356,25 +511,117 @@ function GameContent() {
 
   if (!user) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="min-h-screen bg-[#f8f9fa] flex items-center justify-center p-4 relative overflow-hidden">
+        {/* Decorative Background Elements */}
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/5 rounded-full blur-[120px]" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary/5 rounded-full blur-[120px]" />
+        
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white/90 backdrop-blur-xl p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border-4 border-white"
+          className="bg-white/80 backdrop-blur-xl p-10 rounded-[40px] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.1)] max-w-md w-full border-4 border-white relative z-10"
         >
-          <div className="w-20 h-20 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-6">
-            <Trophy className="w-10 h-10 text-primary" />
-          </div>
-          <h1 className="text-4xl font-bold text-primary mb-2">Vòng Quay May Mắn</h1>
-          <p className="text-dark/60 mb-8 font-medium">Đăng nhập để bắt đầu trò chơi và lưu trữ dữ liệu của bạn!</p>
+          {!isSupabaseConfigured && (
+            <div className="mb-6 p-4 bg-red-50 border-2 border-red-100 rounded-2xl text-red-600 text-sm font-bold flex items-center gap-3">
+              <Shield className="w-5 h-5 shrink-0" />
+              <div>
+                Chưa cấu hình Supabase! Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY vào phần Secrets.
+              </div>
+            </div>
+          )}
           
+          <div className="w-24 h-24 bg-gradient-to-tr from-primary/20 to-secondary/20 rounded-3xl flex items-center justify-center mx-auto mb-8 rotate-3 shadow-inner">
+            <Trophy className="w-12 h-12 text-primary drop-shadow-sm" />
+          </div>
+          
+          <h1 className="text-4xl font-black text-dark mb-2 text-center tracking-tight">Vòng Quay May Mắn</h1>
+          <p className="text-dark/40 mb-10 font-bold text-center uppercase text-xs tracking-widest">
+            {authMode === 'login' ? 'Đăng nhập để bắt đầu' : 'Tạo tài khoản mới'}
+          </p>
+          
+          <form onSubmit={handleEmailAuth} className="space-y-4 mb-8">
+            {authMode === 'register' && (
+              <div className="relative group">
+                <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-primary transition-colors" />
+                <input 
+                  type="text" 
+                  placeholder="Họ và tên" 
+                  required
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-primary/30 focus:bg-white rounded-2xl outline-none transition-all font-bold text-dark"
+                />
+              </div>
+            )}
+            <div className="relative group">
+              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-primary transition-colors" />
+              <input 
+                type="email" 
+                placeholder="Email" 
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-primary/30 focus:bg-white rounded-2xl outline-none transition-all font-bold text-dark"
+              />
+            </div>
+            <div className="relative group">
+              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-primary transition-colors" />
+              <input 
+                type="password" 
+                placeholder="Mật khẩu" 
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-primary/30 focus:bg-white rounded-2xl outline-none transition-all font-bold text-dark"
+              />
+            </div>
+            
+            {authError && (
+              <motion.div 
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="bg-red-50 text-red-500 p-3 rounded-xl text-xs font-bold text-center border border-red-100"
+              >
+                {authError}
+              </motion.div>
+            )}
+            
+            <button 
+              type="submit"
+              disabled={loading}
+              className="w-full bg-primary text-white py-4 rounded-2xl font-black text-lg shadow-[0_6px_0_#c23616] active:translate-y-1 active:shadow-none transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading ? <Loader2 className="w-6 h-6 animate-spin" /> : (authMode === 'login' ? 'ĐĂNG NHẬP' : 'ĐĂNG KÝ')}
+            </button>
+          </form>
+
+          <div className="relative mb-8">
+            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-100"></div></div>
+            <div className="relative flex justify-center text-[10px]"><span className="px-4 bg-white text-gray-400 font-black tracking-widest uppercase">Hoặc tiếp tục với</span></div>
+          </div>
+
           <button 
-            onClick={() => signInWithPopup(auth, googleProvider)}
-            className="w-full flex items-center justify-center gap-3 bg-white border-2 border-gray-100 py-4 rounded-2xl font-bold text-lg hover:bg-gray-50 transition-all shadow-sm active:scale-95"
+            onClick={signInWithGoogle}
+            className="w-full flex items-center justify-center gap-3 bg-white border-2 border-gray-100 py-4 rounded-2xl font-bold text-lg hover:bg-gray-50 transition-all shadow-sm active:scale-[0.98] mb-8"
           >
-            <img src="https://www.google.com/favicon.ico" className="w-6 h-6" alt="Google" />
-            Đăng nhập với Google
+            <svg className="w-6 h-6" viewBox="0 0 24 24">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+            </svg>
+            Google
           </button>
+
+          <p className="text-center font-bold text-gray-400 text-sm">
+            {authMode === 'login' ? 'Chưa có tài khoản?' : 'Đã có tài khoản?'}
+            <button 
+              onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
+              className="ml-2 text-primary hover:underline font-black"
+            >
+              {authMode === 'login' ? 'Đăng ký ngay' : 'Đăng nhập'}
+            </button>
+          </p>
         </motion.div>
       </div>
     );
@@ -400,12 +647,32 @@ function GameContent() {
       <div className="w-full max-w-7xl bg-white/85 backdrop-blur-xl rounded-[40px] border-4 border-white shadow-2xl grid grid-cols-1 lg:grid-cols-2 gap-8 p-6 md:p-10 relative overflow-hidden">
         {/* Header with User Info */}
         <div className="absolute top-6 right-6 flex items-center gap-4 z-10">
+          {isAdmin && (
+            <button 
+              onClick={() => setShowAdmin(true)}
+              className="p-2 bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors border border-accent/20"
+              title="Quản trị"
+            >
+              <Shield className="w-5 h-5" />
+            </button>
+          )}
           <div className="flex items-center gap-2 bg-white/50 px-3 py-1.5 rounded-full border border-white">
-            <img src={user.photoURL || ''} className="w-8 h-8 rounded-full" alt={user.displayName || ''} />
-            <span className="font-bold text-sm hidden sm:inline">{user.displayName}</span>
+            {user.user_metadata?.avatar_url ? (
+              <img 
+                src={user.user_metadata.avatar_url} 
+                className="w-8 h-8 rounded-full" 
+                alt={userProfile?.display_name || user.user_metadata.display_name || user.user_metadata.full_name || ''} 
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-8 h-8 bg-primary/20 rounded-full flex items-center justify-center text-primary font-bold">
+                {(userProfile?.display_name || user.user_metadata?.display_name || user.user_metadata?.full_name || 'U').charAt(0)}
+              </div>
+            )}
+            <span className="font-bold text-sm hidden sm:inline">{userProfile?.display_name || user.user_metadata?.display_name || user.user_metadata?.full_name}</span>
           </div>
           <button 
-            onClick={() => signOut(auth)}
+            onClick={() => supabase.auth.signOut()}
             className="p-2 bg-white/50 rounded-full hover:bg-red-50 hover:text-red-500 transition-colors border border-white"
             title="Đăng xuất"
           >
@@ -492,7 +759,11 @@ function GameContent() {
               {isMuted ? <VolumeX className="w-6 h-6" /> : <Volume2 className="w-6 h-6" />}
             </button>
             <button 
-              onClick={() => setShowSettings(true)}
+              onClick={() => {
+                setTempStudents(allStudents.join('\n'));
+                setTempQuestions(questions.join('\n'));
+                setShowSettings(true);
+              }}
               className="btn bg-dark shadow-[0_6px_0_#1e272e] px-6"
             >
               <Settings className="w-6 h-6" />
@@ -582,7 +853,124 @@ function GameContent() {
         </div>
       </div>
 
-      {/* Settings Modal */}
+      {/* Admin Modal */}
+      <AnimatePresence>
+        {showAdmin && (
+          <div className="fixed inset-0 z-[120] bg-dark/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white w-full max-w-5xl rounded-[32px] overflow-hidden shadow-2xl border-4 border-accent flex flex-col max-h-[90vh]"
+            >
+              <div className="bg-accent p-6 flex justify-between items-center text-white">
+                <h2 className="text-2xl font-bold flex items-center gap-3">
+                  <Shield className="w-7 h-7" /> Trang Quản Trị
+                </h2>
+                <button onClick={() => setShowAdmin(false)} className="p-2 bg-black/20 rounded-full hover:bg-black/30 transition-colors">
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="p-8 overflow-y-auto flex-1">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                  <div className="bg-accent/5 p-6 rounded-3xl border-2 border-accent/10">
+                    <h3 className="text-gray-400 font-bold uppercase text-xs mb-2">Tổng người dùng</h3>
+                    <p className="text-4xl font-black text-accent">{allUsers.length}</p>
+                  </div>
+                  <div className="bg-primary/5 p-6 rounded-3xl border-2 border-primary/10">
+                    <h3 className="text-gray-400 font-bold uppercase text-xs mb-2">Dữ liệu Game</h3>
+                    <p className="text-4xl font-black text-primary">{totalSettings}</p>
+                  </div>
+                  <div className="bg-secondary/5 p-6 rounded-3xl border-2 border-secondary/10">
+                    <h3 className="text-gray-400 font-bold uppercase text-xs mb-2">Trạng thái</h3>
+                    <p className="text-4xl font-black text-secondary">Online</p>
+                  </div>
+                </div>
+
+                <div className="mb-6 relative">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
+                  <input 
+                    type="text"
+                    placeholder="Tìm kiếm người dùng bằng tên hoặc email..."
+                    value={adminSearch}
+                    onChange={(e) => setAdminSearch(e.target.value)}
+                    className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-accent rounded-2xl outline-none font-bold transition-all"
+                  />
+                </div>
+
+                <div className="bg-white rounded-3xl border-2 border-gray-100 overflow-hidden">
+                  <table className="w-full text-left">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-4 font-bold text-gray-500">Người dùng</th>
+                        <th className="px-6 py-4 font-bold text-gray-500">Email</th>
+                        <th className="px-6 py-4 font-bold text-gray-500">Vai trò</th>
+                        <th className="px-6 py-4 font-bold text-gray-500">Ngày tham gia</th>
+                        <th className="px-6 py-4 font-bold text-gray-500">Thao tác</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {adminLoading ? (
+                        <tr>
+                          <td colSpan={5} className="px-6 py-10 text-center">
+                            <Loader2 className="w-8 h-8 text-accent animate-spin mx-auto" />
+                          </td>
+                        </tr>
+                      ) : (
+                        allUsers
+                          .filter(u => 
+                            u.display_name?.toLowerCase().includes(adminSearch.toLowerCase()) || 
+                            u.email?.toLowerCase().includes(adminSearch.toLowerCase())
+                          )
+                          .map((u) => (
+                          <tr key={u.id} className="hover:bg-gray-50 transition-colors">
+                            <td className="px-6 py-4 font-bold">{u.display_name}</td>
+                            <td className="px-6 py-4 text-gray-500">{u.email}</td>
+                            <td className="px-6 py-4">
+                              <select 
+                                value={u.role}
+                                onChange={(e) => updateUserRole(u.id, e.target.value)}
+                                className={`px-3 py-1 rounded-full text-xs font-bold outline-none border-none cursor-pointer ${u.role === 'admin' ? 'bg-accent text-white' : 'bg-gray-100 text-gray-500'}`}
+                              >
+                                <option value="user">USER</option>
+                                <option value="admin">ADMIN</option>
+                              </select>
+                            </td>
+                            <td className="px-6 py-4 text-gray-400 text-sm">
+                              {u.created_at ? new Date(u.created_at).toLocaleDateString('vi-VN') : 'N/A'}
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="flex items-center gap-2">
+                                <button 
+                                  onClick={() => deleteUserGameData(u.id)}
+                                  className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                  title="Xóa dữ liệu game"
+                                >
+                                  <Trash2 className="w-5 h-5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="p-6 bg-gray-50 flex justify-end">
+                <button 
+                  onClick={() => setShowAdmin(false)}
+                  className="bg-accent text-white px-8 py-3 rounded-xl font-black shadow-[0_4px_0_#5f27cd] active:translate-y-1 active:shadow-none"
+                >
+                  ĐÓNG
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
       <AnimatePresence>
         {showSettings && (
           <div className="fixed inset-0 z-[110] bg-dark/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -625,8 +1013,8 @@ function GameContent() {
                     <label className="block font-bold text-lg">Danh sách Học sinh (Mỗi bạn 1 dòng):</label>
                     <textarea 
                       className="w-full h-64 p-4 border-2 border-gray-100 rounded-2xl focus:outline-none focus:border-secondary font-semibold"
-                      value={allStudents.join('\n')}
-                      onChange={(e) => setAllStudents(e.target.value.split('\n').filter(s => s.trim()))}
+                      value={tempStudents}
+                      onChange={(e) => setTempStudents(e.target.value)}
                     />
                   </div>
                 )}
@@ -636,8 +1024,8 @@ function GameContent() {
                     <label className="block font-bold text-lg">Danh sách Câu hỏi hiện tại:</label>
                     <textarea 
                       className="w-full h-64 p-4 border-2 border-gray-100 rounded-2xl focus:outline-none focus:border-secondary font-semibold"
-                      value={questions.join('\n')}
-                      onChange={(e) => setQuestions(e.target.value.split('\n').filter(q => q.trim()))}
+                      value={tempQuestions}
+                      onChange={(e) => setTempQuestions(e.target.value)}
                     />
                   </div>
                 )}
@@ -705,8 +1093,17 @@ function GameContent() {
                 </button>
                 <button 
                   onClick={() => {
-                    const finalQuestions = activeTab === 'ai' ? aiResult.split('\n').filter(q => q.trim()) : questions;
-                    saveGameData(allStudents, finalQuestions);
+                    const finalStudents = tempStudents.split('\n').filter(s => s.trim());
+                    const finalQuestions = activeTab === 'ai' ? aiResult.split('\n').filter(q => q.trim()) : tempQuestions.split('\n').filter(q => q.trim());
+                    
+                    setAllStudents(finalStudents);
+                    setQuestions(finalQuestions);
+                    setRemainingStudents([...finalStudents]); // Reset game state when list changes
+                    setHistory([]);
+                    setSelectedStudent(null);
+                    setCurrentQuestion(null);
+                    
+                    saveGameData(finalStudents, finalQuestions);
                     setShowSettings(false);
                   }}
                   className="bg-success text-white px-8 py-3 rounded-xl font-black shadow-[0_4px_0_#27ae60] active:translate-y-1 active:shadow-none flex items-center gap-2"
