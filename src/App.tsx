@@ -29,7 +29,9 @@ import {
   User as UserIcon,
   Shield,
   Search,
-  Trash2
+  Trash2,
+  History,
+  Eye
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
@@ -98,6 +100,22 @@ function GameContent() {
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminSearch, setAdminSearch] = useState('');
   const [totalSettings, setTotalSettings] = useState(0);
+  const [viewingUserData, setViewingUserData] = useState<any>(null);
+
+  const fetchUserGameData = async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('game_settings')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+      
+      if (error && error.code !== 'PGRST116') throw error;
+      setViewingUserData(data || { students: [], questions: [] });
+    } catch (error) {
+      console.error("Error fetching user game data:", error);
+    }
+  };
   
   const [allStudents, setAllStudents] = useState<string[]>(DEFAULT_STUDENTS);
   const [questions, setQuestions] = useState<string[]>(DEFAULT_QUESTIONS);
@@ -117,6 +135,8 @@ function GameContent() {
   
   const [quickAdd, setQuickAdd] = useState('');
   const [isAudioStarted, setIsAudioStarted] = useState(false);
+  const [showWinnerModal, setShowWinnerModal] = useState(false);
+  const [winnerInfo, setWinnerInfo] = useState<{ name: string; question: string } | null>(null);
   
   const isSupabaseConfigured = !!import.meta.env.VITE_SUPABASE_URL && !!import.meta.env.VITE_SUPABASE_ANON_KEY;
 
@@ -169,10 +189,32 @@ function GameContent() {
         .eq('id', userId)
         .single();
 
-      if (error) throw error;
-      
-      setUserProfile(data);
-      setIsAdmin(data.role === 'admin');
+      if (error) {
+        if (error.code === 'PGRST116') {
+          // User profile doesn't exist, create it
+          const { data: newUser, error: createError } = await supabase
+            .from('users')
+            .insert([
+              { 
+                id: userId, 
+                email: user?.email, 
+                display_name: user?.user_metadata?.display_name || user?.email?.split('@')[0],
+                role: 'user' 
+              }
+            ])
+            .select()
+            .single();
+          
+          if (createError) throw createError;
+          setUserProfile(newUser);
+          setIsAdmin(newUser.role === 'admin');
+        } else {
+          throw error;
+        }
+      } else {
+        setUserProfile(data);
+        setIsAdmin(data.role === 'admin');
+      }
     } catch (error) {
       console.error("Error fetching profile:", error);
     } finally {
@@ -187,7 +229,8 @@ function GameContent() {
     setLoading(true);
     try {
       if (authMode === 'register') {
-        const { error } = await supabase.auth.signUp({
+        if (!displayName.trim()) throw new Error("Vui lòng nhập tên hiển thị");
+        const { data, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
@@ -197,7 +240,19 @@ function GameContent() {
           }
         });
         if (error) throw error;
-        alert("Vui lòng kiểm tra email để xác nhận tài khoản!");
+        
+        // Create profile immediately if auto-confirm is on or if we want to ensure it exists
+        if (data.user) {
+          await supabase.from('users').upsert({
+            id: data.user.id,
+            email: email,
+            display_name: displayName,
+            role: 'user'
+          });
+        }
+        
+        alert("Đăng ký thành công! Vui lòng kiểm tra email (nếu có yêu cầu xác nhận) hoặc đăng nhập ngay.");
+        setAuthMode('login');
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email,
@@ -265,6 +320,21 @@ function GameContent() {
       alert("Đã xóa dữ liệu thành công.");
     } catch (error) {
       console.error("Error deleting data:", error);
+    }
+  };
+
+  const resetUserPassword = async (email: string) => {
+    if (!isAdmin) return;
+    if (!confirm(`Bạn có chắc muốn gửi email khôi phục mật khẩu cho ${email}?`)) return;
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin,
+      });
+      if (error) throw error;
+      alert("Đã gửi email khôi phục mật khẩu thành công.");
+    } catch (error) {
+      console.error("Error resetting password:", error);
+      alert("Lỗi: " + (error as any).message);
     }
   };
 
@@ -388,8 +458,15 @@ function GameContent() {
   };
 
   // --- Game Logic ---
+  const playClick = () => {
+    if (isAudioStarted && !isMuted && spinSynth.current) {
+      spinSynth.current.triggerAttackRelease("G4", "32n", undefined, 0.4);
+    }
+  };
+
   const spin = () => {
     if (isSpinning || remainingStudents.length === 0) return;
+    playClick();
 
     setIsSpinning(true);
     setSelectedStudent("Đang quay...");
@@ -405,12 +482,30 @@ function GameContent() {
     
     setRotation(newRotation);
 
-    // Sound effect
+    // Sound effect - Dynamic based on rotation
     if (isAudioStarted && !isMuted && spinSynth.current) {
-      const interval = setInterval(() => {
-        spinSynth.current?.triggerAttackRelease("C3", "16n");
-      }, 100);
-      setTimeout(() => clearInterval(interval), 4500);
+      let lastSegment = -1;
+      const startTime = Date.now();
+      const duration = 5000;
+      
+      const checkSegment = () => {
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= duration) return;
+        
+        // Ease out calculation matches CSS transition
+        const t = elapsed / duration;
+        const easeOut = 1 - Math.pow(1 - t, 3); // Simple cubic ease out approximation
+        const currentRot = rotation + (newRotation - rotation) * easeOut;
+        const currentSegment = Math.floor((currentRot % 360) / segmentAngle);
+        
+        if (currentSegment !== lastSegment) {
+          spinSynth.current?.triggerAttackRelease("C4", "32n", undefined, 0.3);
+          lastSegment = currentSegment;
+        }
+        
+        requestAnimationFrame(checkSegment);
+      };
+      requestAnimationFrame(checkSegment);
     }
 
     setTimeout(() => {
@@ -421,6 +516,7 @@ function GameContent() {
         ? questions[Math.floor(Math.random() * questions.length)]
         : "Hãy chia sẻ một điều thú vị về bản thân!";
       setCurrentQuestion(randomQuestion);
+      setWinnerInfo({ name: winner, question: randomQuestion });
 
       // Remove winner from remaining
       const newRemaining = [...remainingStudents];
@@ -430,15 +526,19 @@ function GameContent() {
 
       // Celebration
       confetti({
-        particleCount: 150,
-        spread: 70,
+        particleCount: 200,
+        spread: 90,
         origin: { y: 0.6 },
-        colors: COLOR_PALETTE
+        colors: COLOR_PALETTE,
+        scalar: 1.2
       });
 
       if (isAudioStarted && !isMuted && winSynth.current) {
         winSynth.current.triggerAttackRelease(["C5", "E5", "G5", "C6"], "2n");
       }
+
+      // Show modal after a short delay
+      setTimeout(() => setShowWinnerModal(true), 800);
     }, 5000);
   };
 
@@ -510,69 +610,81 @@ function GameContent() {
   }
 
   if (!user) {
+    const greeting = new Date().getHours() < 12 ? 'Chào buổi sáng' : new Date().getHours() < 18 ? 'Chào buổi chiều' : 'Chào buổi tối';
+
     return (
-      <div className="min-h-screen bg-[#f8f9fa] flex items-center justify-center p-4 relative overflow-hidden">
-        {/* Decorative Background Elements */}
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/5 rounded-full blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-secondary/5 rounded-full blur-[120px]" />
+      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center p-4 relative overflow-hidden font-sans">
+        {/* Atmospheric Background */}
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-[60%] h-[60%] bg-primary/20 rounded-full blur-[120px] animate-pulse" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[60%] h-[60%] bg-secondary/20 rounded-full blur-[120px] animate-pulse delay-700" />
+          <div className="absolute top-[20%] right-[10%] w-[30%] h-[30%] bg-accent/10 rounded-full blur-[100px]" />
+        </div>
         
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white/80 backdrop-blur-xl p-10 rounded-[40px] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.1)] max-w-md w-full border-4 border-white relative z-10"
+          transition={{ duration: 0.6, ease: "easeOut" }}
+          className="bg-white/[0.03] backdrop-blur-2xl p-8 md:p-12 rounded-[48px] shadow-[0_32px_64px_-16px_rgba(0,0,0,0.5)] max-w-md w-full border border-white/10 relative z-10"
         >
           {!isSupabaseConfigured && (
-            <div className="mb-6 p-4 bg-red-50 border-2 border-red-100 rounded-2xl text-red-600 text-sm font-bold flex items-center gap-3">
+            <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-sm font-bold flex items-center gap-3">
               <Shield className="w-5 h-5 shrink-0" />
               <div>
-                Chưa cấu hình Supabase! Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY vào phần Secrets.
+                Chưa cấu hình Supabase! Vui lòng thêm VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY.
               </div>
             </div>
           )}
           
-          <div className="w-24 h-24 bg-gradient-to-tr from-primary/20 to-secondary/20 rounded-3xl flex items-center justify-center mx-auto mb-8 rotate-3 shadow-inner">
-            <Trophy className="w-12 h-12 text-primary drop-shadow-sm" />
+          <div className="flex flex-col items-center mb-10">
+            <motion.div 
+              whileHover={{ rotate: 10, scale: 1.1 }}
+              className="w-20 h-20 bg-gradient-to-br from-primary to-secondary rounded-3xl flex items-center justify-center mb-6 shadow-lg shadow-primary/20"
+            >
+              <Trophy className="w-10 h-10 text-white" />
+            </motion.div>
+            <h1 className="text-3xl font-black text-white mb-2 tracking-tight text-center">
+              {greeting}!
+            </h1>
+            <p className="text-white/40 font-bold text-center uppercase text-[10px] tracking-[0.3em]">
+              {authMode === 'login' ? 'Đăng nhập để tiếp tục' : 'Tạo tài khoản mới'}
+            </p>
           </div>
-          
-          <h1 className="text-4xl font-black text-dark mb-2 text-center tracking-tight">Vòng Quay May Mắn</h1>
-          <p className="text-dark/40 mb-10 font-bold text-center uppercase text-xs tracking-widest">
-            {authMode === 'login' ? 'Đăng nhập để bắt đầu' : 'Tạo tài khoản mới'}
-          </p>
           
           <form onSubmit={handleEmailAuth} className="space-y-4 mb-8">
             {authMode === 'register' && (
               <div className="relative group">
-                <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-primary transition-colors" />
+                <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-white/20 w-5 h-5 group-focus-within:text-primary transition-colors" />
                 <input 
                   type="text" 
                   placeholder="Họ và tên" 
                   required
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
-                  className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-primary/30 focus:bg-white rounded-2xl outline-none transition-all font-bold text-dark"
+                  className="w-full pl-12 pr-4 py-4 bg-white/[0.05] border border-white/10 focus:border-primary/50 focus:bg-white/[0.08] rounded-2xl outline-none transition-all font-bold text-white placeholder:text-white/20"
                 />
               </div>
             )}
             <div className="relative group">
-              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-primary transition-colors" />
+              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-white/20 w-5 h-5 group-focus-within:text-primary transition-colors" />
               <input 
                 type="email" 
                 placeholder="Email" 
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-primary/30 focus:bg-white rounded-2xl outline-none transition-all font-bold text-dark"
+                className="w-full pl-12 pr-4 py-4 bg-white/[0.05] border border-white/10 focus:border-primary/50 focus:bg-white/[0.08] rounded-2xl outline-none transition-all font-bold text-white placeholder:text-white/20"
               />
             </div>
             <div className="relative group">
-              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5 group-focus-within:text-primary transition-colors" />
+              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-white/20 w-5 h-5 group-focus-within:text-primary transition-colors" />
               <input 
                 type="password" 
                 placeholder="Mật khẩu" 
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full pl-12 pr-4 py-4 bg-gray-50 border-2 border-transparent focus:border-primary/30 focus:bg-white rounded-2xl outline-none transition-all font-bold text-dark"
+                className="w-full pl-12 pr-4 py-4 bg-white/[0.05] border border-white/10 focus:border-primary/50 focus:bg-white/[0.08] rounded-2xl outline-none transition-all font-bold text-white placeholder:text-white/20"
               />
             </div>
             
@@ -580,7 +692,7 @@ function GameContent() {
               <motion.div 
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="bg-red-50 text-red-500 p-3 rounded-xl text-xs font-bold text-center border border-red-100"
+                className="bg-red-500/10 text-red-400 p-3 rounded-xl text-xs font-bold text-center border border-red-500/20"
               >
                 {authError}
               </motion.div>
@@ -589,35 +701,17 @@ function GameContent() {
             <button 
               type="submit"
               disabled={loading}
-              className="w-full bg-primary text-white py-4 rounded-2xl font-black text-lg shadow-[0_6px_0_#c23616] active:translate-y-1 active:shadow-none transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              className="w-full bg-primary text-white py-4 rounded-2xl font-black text-lg shadow-lg shadow-primary/20 hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center gap-2"
             >
               {loading ? <Loader2 className="w-6 h-6 animate-spin" /> : (authMode === 'login' ? 'ĐĂNG NHẬP' : 'ĐĂNG KÝ')}
             </button>
           </form>
 
-          <div className="relative mb-8">
-            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-100"></div></div>
-            <div className="relative flex justify-center text-[10px]"><span className="px-4 bg-white text-gray-400 font-black tracking-widest uppercase">Hoặc tiếp tục với</span></div>
-          </div>
-
-          <button 
-            onClick={signInWithGoogle}
-            className="w-full flex items-center justify-center gap-3 bg-white border-2 border-gray-100 py-4 rounded-2xl font-bold text-lg hover:bg-gray-50 transition-all shadow-sm active:scale-[0.98] mb-8"
-          >
-            <svg className="w-6 h-6" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
-              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-            </svg>
-            Google
-          </button>
-
-          <p className="text-center font-bold text-gray-400 text-sm">
+          <p className="text-center font-bold text-white/30 text-sm">
             {authMode === 'login' ? 'Chưa có tài khoản?' : 'Đã có tài khoản?'}
             <button 
               onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
-              className="ml-2 text-primary hover:underline font-black"
+              className="ml-2 text-primary hover:text-primary/80 transition-colors font-black"
             >
               {authMode === 'login' ? 'Đăng ký ngay' : 'Đăng nhập'}
             </button>
@@ -628,74 +722,104 @@ function GameContent() {
   }
 
   return (
-    <div className="min-h-screen p-4 md:p-8 flex items-center justify-center">
+    <div className="min-h-screen p-4 md:p-8 flex items-center justify-center relative overflow-hidden">
+      {/* Background Decorative Elements */}
+      <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-primary/10 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-secondary/10 rounded-full blur-[120px] pointer-events-none" />
+
       {!isAudioStarted && (
-        <div className="fixed inset-0 z-[100] bg-white/90 backdrop-blur-md flex flex-center items-center justify-center text-center p-6">
-          <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }}>
-            <h1 className="text-5xl md:text-7xl font-bold text-primary mb-4 drop-shadow-sm">VÒNG QUAY MAY MẮN</h1>
-            <p className="text-xl md:text-2xl font-bold text-secondary mb-8">Phiên Bản Lớp Học Siêu Cấp</p>
+        <div className="fixed inset-0 z-[100] bg-dark/40 backdrop-blur-xl flex items-center justify-center text-center p-6">
+          <motion.div 
+            initial={{ scale: 0.8, opacity: 0 }} 
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-white p-12 rounded-[64px] shadow-2xl border-8 border-white max-w-2xl w-full"
+          >
+            <div className="w-24 h-24 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-8 animate-float">
+              <Trophy className="w-12 h-12 text-primary" />
+            </div>
+            <h1 className="text-5xl md:text-7xl font-black text-dark mb-4 tracking-tighter">VÒNG QUAY</h1>
+            <p className="text-2xl font-bold text-primary mb-12 uppercase tracking-[0.2em]">Phiên Bản Siêu Cấp</p>
             <button 
               onClick={startAudio}
-              className="bg-success text-white text-2xl font-black px-12 py-5 rounded-full shadow-[0_8px_0_#2ecc71] hover:brightness-110 active:translate-y-1 active:shadow-none transition-all"
+              className="w-full bg-primary text-white text-2xl font-black py-6 rounded-3xl shadow-[0_12px_0_#c23616] hover:brightness-110 active:translate-y-2 active:shadow-none transition-all"
             >
-              BẮT ĐẦU NGAY!
+              BẮT ĐẦU TRẢI NGHIỆM
             </button>
           </motion.div>
         </div>
       )}
 
-      <div className="w-full max-w-7xl bg-white/85 backdrop-blur-xl rounded-[40px] border-4 border-white shadow-2xl grid grid-cols-1 lg:grid-cols-2 gap-8 p-6 md:p-10 relative overflow-hidden">
-        {/* Header with User Info */}
-        <div className="absolute top-6 right-6 flex items-center gap-4 z-10">
-          {isAdmin && (
-            <button 
-              onClick={() => setShowAdmin(true)}
-              className="p-2 bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors border border-accent/20"
-              title="Quản trị"
-            >
-              <Shield className="w-5 h-5" />
-            </button>
-          )}
-          <div className="flex items-center gap-2 bg-white/50 px-3 py-1.5 rounded-full border border-white">
-            {user.user_metadata?.avatar_url ? (
-              <img 
-                src={user.user_metadata.avatar_url} 
-                className="w-8 h-8 rounded-full" 
-                alt={userProfile?.display_name || user.user_metadata.display_name || user.user_metadata.full_name || ''} 
-                referrerPolicy="no-referrer"
-              />
-            ) : (
-              <div className="w-8 h-8 bg-primary/20 rounded-full flex items-center justify-center text-primary font-bold">
-                {(userProfile?.display_name || user.user_metadata?.display_name || user.user_metadata?.full_name || 'U').charAt(0)}
-              </div>
-            )}
-            <span className="font-bold text-sm hidden sm:inline">{userProfile?.display_name || user.user_metadata?.display_name || user.user_metadata?.full_name}</span>
+      <div className="w-full max-w-7xl glass-panel rounded-[64px] grid grid-cols-1 lg:grid-cols-12 gap-0 relative overflow-hidden min-h-[85vh]">
+        {/* Top Status Bar */}
+        <div className="lg:col-span-12 h-20 border-b border-white/20 flex items-center justify-between px-8 bg-white/20">
+          <div className="flex items-center gap-4">
+            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center shadow-lg shadow-primary/20">
+              <Trophy className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-dark leading-none">VÒNG QUAY MAY MẮN</h2>
+              <p className="text-[10px] font-bold text-dark/40 uppercase tracking-widest">Hệ thống chọn học sinh thông minh</p>
+            </div>
           </div>
-          <button 
-            onClick={() => supabase.auth.signOut()}
-            className="p-2 bg-white/50 rounded-full hover:bg-red-50 hover:text-red-500 transition-colors border border-white"
-            title="Đăng xuất"
-          >
-            <LogOut className="w-5 h-5" />
-          </button>
-        </div>
 
-        {/* Left: Wheel Area */}
-        <div className="flex flex-col items-center justify-center bg-white/40 rounded-3xl p-6 border-2 border-dashed border-gray-200">
-          <h1 className="text-4xl md:text-5xl font-black text-primary mb-8 text-center drop-shadow-sm">
-            Ai Lên Bảng Nào?
-          </h1>
-
-          <div className="relative w-full max-w-[450px] aspect-square mb-10">
-            {/* Pointer */}
-            <div className="absolute -top-6 left-1/2 -translate-x-1/2 z-20">
-              <div className="w-0 h-0 border-l-[20px] border-l-transparent border-r-[20px] border-r-transparent border-t-[45px] border-t-primary drop-shadow-md" />
-              <div className="absolute -top-10 left-1/2 -translate-x-1/2 w-8 h-5 bg-dark rounded-full" />
+          <div className="flex items-center gap-6">
+            <div className="hidden md:flex items-center gap-8 mr-4">
+              <div className="text-center">
+                <p className="text-[10px] font-bold text-dark/40 uppercase">Học sinh</p>
+                <p className="text-lg font-black text-primary leading-none">{remainingStudents.length}/{allStudents.length}</p>
+              </div>
+              <div className="text-center">
+                <p className="text-[10px] font-bold text-dark/40 uppercase">Lượt quay</p>
+                <p className="text-lg font-black text-secondary leading-none">{history.length}</p>
+              </div>
             </div>
 
+            <div className="flex items-center gap-3">
+              {isAdmin && (
+                <button 
+                  onClick={() => setShowAdmin(true)}
+                  className="w-10 h-10 flex items-center justify-center bg-accent/10 text-accent rounded-xl hover:bg-accent/20 transition-all border border-accent/20"
+                >
+                  <Shield className="w-5 h-5" />
+                </button>
+              )}
+              <div className="flex items-center gap-3 bg-white/40 p-1.5 pr-4 rounded-xl border border-white/60">
+                {user.user_metadata?.avatar_url ? (
+                  <img src={user.user_metadata.avatar_url} className="w-7 h-7 rounded-lg shadow-sm" alt="Avatar" referrerPolicy="no-referrer" />
+                ) : (
+                  <div className="w-7 h-7 bg-primary/20 rounded-lg flex items-center justify-center text-primary font-bold text-xs">
+                    {(userProfile?.display_name || 'U').charAt(0)}
+                  </div>
+                )}
+                <span className="font-black text-xs text-dark/70 uppercase tracking-wider truncate max-w-[100px]">
+                  {userProfile?.display_name || user.user_metadata?.display_name || 'User'}
+                </span>
+              </div>
+              <button 
+                onClick={() => supabase.auth.signOut()}
+                className="w-10 h-10 flex items-center justify-center bg-white/40 text-red-500 rounded-xl hover:bg-red-500 hover:text-white transition-all border border-white/60"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Left: Wheel Area (7 cols) */}
+        <div className="lg:col-span-7 p-8 md:p-12 flex flex-col items-center justify-center relative border-r border-white/10">
+          <div className="relative w-full max-w-[500px] aspect-square mb-12 animate-float">
+            {/* Pointer */}
+            <div className="absolute -top-8 left-1/2 -translate-x-1/2 z-30">
+              <div className="w-0 h-0 border-l-[25px] border-l-transparent border-r-[25px] border-r-transparent border-t-[55px] border-t-primary drop-shadow-[0_10px_10px_rgba(255,107,107,0.3)]" />
+              <div className="absolute -top-12 left-1/2 -translate-x-1/2 w-10 h-6 bg-dark rounded-full shadow-lg" />
+            </div>
+
+            {/* Wheel Outer Ring */}
+            <div className="absolute inset-[-20px] rounded-full border-[20px] border-white/30 shadow-inner pointer-events-none z-0" />
+            
             {/* Wheel */}
             <div 
-              className={`w-full h-full rounded-full border-[15px] border-warning shadow-2xl relative overflow-hidden transition-transform duration-[5000ms] ease-[cubic-bezier(0.15,0.85,0.35,1)] ${isSpinning ? 'ring-8 ring-warning/30' : ''}`}
+              className={`w-full h-full rounded-full border-[18px] border-warning shadow-[0_30px_60px_-15px_rgba(0,0,0,0.3)] relative overflow-hidden transition-transform duration-[5000ms] ease-[cubic-bezier(0.15,0.85,0.35,1)] wheel-glow z-10`}
               style={{ transform: `rotate(${rotation}deg)` }}
             >
               {remainingStudents.length > 0 ? (
@@ -708,15 +832,16 @@ function GameContent() {
                       style={{ transform: `rotate(${i * angle}deg)` }}
                     >
                       <div 
-                        className="absolute w-1/2 h-1/2 origin-bottom-right border border-white/20"
+                        className="absolute w-1/2 h-1/2 origin-bottom-right border-r border-white/10"
                         style={{ 
                           background: COLOR_PALETTE[i % COLOR_PALETTE.length],
                           clipPath: `polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)`,
                           transform: `rotate(${angle / 2}deg) translateY(-50%)`
                         }}
                       >
+                        <div className="absolute inset-0 bg-gradient-to-b from-white/20 to-transparent pointer-events-none" />
                         <span 
-                          className="absolute bottom-4 left-1/2 -translate-x-1/2 font-black text-lg whitespace-nowrap"
+                          className="absolute bottom-6 left-1/2 -translate-x-1/2 font-black text-xl text-white drop-shadow-md whitespace-nowrap"
                           style={{ transform: `rotate(-${90 + angle / 2}deg) translateY(100%)` }}
                         >
                           {name}
@@ -726,132 +851,260 @@ function GameContent() {
                   );
                 })
               ) : (
-                <div className="w-full h-full bg-gray-100 flex items-center justify-center font-bold text-gray-400">
-                  Hết học sinh!
+                <div className="w-full h-full bg-white/10 backdrop-blur-md flex flex-col items-center justify-center p-8 text-center">
+                  <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mb-6">
+                    <RefreshCw className="w-12 h-12 text-white/60" />
+                  </div>
+                  <p className="text-white font-black text-2xl mb-8">Tất cả học sinh đã được chọn!</p>
+                  <button 
+                    onClick={() => { playClick(); reset(); }}
+                    className="bg-white text-primary px-10 py-4 rounded-2xl font-black text-lg shadow-xl hover:scale-105 transition-all"
+                  >
+                    LÀM MỚI DANH SÁCH
+                  </button>
                 </div>
               )}
               {/* Center Circle */}
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[18%] h-[18%] bg-white rounded-full border-4 border-warning shadow-inner flex items-center justify-center z-10">
-                <span className="text-primary text-2xl">★</span>
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[20%] h-[20%] bg-white rounded-full border-8 border-warning shadow-2xl flex items-center justify-center z-20">
+                <div className="w-full h-full rounded-full bg-gradient-to-br from-white to-gray-100 flex items-center justify-center">
+                  <span className="text-primary text-4xl animate-pulse">★</span>
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="flex flex-wrap justify-center gap-4 w-full">
+          <div className="flex flex-wrap justify-center gap-5 w-full max-w-2xl">
             <button 
               onClick={spin}
               disabled={isSpinning || remainingStudents.length === 0}
-              className="btn bg-primary shadow-[0_6px_0_#c23616] flex-1 min-w-[140px] py-4 text-xl"
+              className="btn-premium bg-primary text-white flex-1 min-w-[200px] py-6 rounded-3xl font-black text-2xl shadow-[0_10px_0_#c23616] hover:brightness-110 active:translate-y-1 active:shadow-none flex items-center justify-center gap-3"
             >
-              <Play className="w-6 h-6 fill-current" /> QUAY
+              <Play className="w-8 h-8 fill-current" /> QUAY NGAY
             </button>
-            <button 
-              onClick={undo}
-              disabled={isSpinning || history.length === 0}
-              className="btn bg-secondary shadow-[0_6px_0_#0abde3] px-6"
-            >
-              <RotateCcw className="w-6 h-6" />
-            </button>
-            <button 
-              onClick={toggleMute}
-              className={`btn ${isMuted ? 'bg-gray-400 shadow-[0_6px_0_#7f8c8d]' : 'bg-warning text-dark shadow-[0_6px_0_#f39c12]'} px-6`}
-            >
-              {isMuted ? <VolumeX className="w-6 h-6" /> : <Volume2 className="w-6 h-6" />}
-            </button>
-            <button 
-              onClick={() => {
-                setTempStudents(allStudents.join('\n'));
-                setTempQuestions(questions.join('\n'));
-                setShowSettings(true);
-              }}
-              className="btn bg-dark shadow-[0_6px_0_#1e272e] px-6"
-            >
-              <Settings className="w-6 h-6" />
-            </button>
-            <button 
-              onClick={reset}
-              className="btn bg-accent shadow-[0_6px_0_#5f27cd] px-6"
-            >
-              <RefreshCw className="w-6 h-6" />
-            </button>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => { playClick(); undo(); }}
+                disabled={isSpinning || history.length === 0}
+                className="btn-premium bg-secondary text-white w-16 h-16 rounded-2xl flex items-center justify-center shadow-[0_6px_0_#0abde3]"
+                title="Hoàn tác"
+              >
+                <RotateCcw className="w-7 h-7" />
+              </button>
+              <button 
+                onClick={toggleMute}
+                className={`btn-premium w-16 h-16 rounded-2xl flex items-center justify-center shadow-[0_6px_0_#7f8c8d] ${isMuted ? 'bg-gray-400' : 'bg-warning text-dark shadow-[0_6px_0_#f39c12]'}`}
+              >
+                {isMuted ? <VolumeX className="w-7 h-7" /> : <Volume2 className="w-7 h-7" />}
+              </button>
+              <button 
+                onClick={() => {
+                  playClick();
+                  setTempStudents(allStudents.join('\n'));
+                  setTempQuestions(questions.join('\n'));
+                  setShowSettings(true);
+                }}
+                className="btn-premium bg-dark text-white w-16 h-16 rounded-2xl flex items-center justify-center shadow-[0_6px_0_#1e272e]"
+              >
+                <Settings className="w-7 h-7" />
+              </button>
+              <button 
+                onClick={() => { playClick(); reset(); }}
+                className="btn-premium bg-accent text-white w-16 h-16 rounded-2xl flex items-center justify-center shadow-[0_6px_0_#5f27cd]"
+              >
+                <RefreshCw className="w-7 h-7" />
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Right: Info Area */}
-        <div className="flex flex-col gap-6">
-          {/* Result Box */}
-          <div className="bg-white rounded-3xl p-6 shadow-sm border-b-8 border-primary flex flex-col items-center justify-center min-h-[160px] text-center">
-            <h2 className="text-gray-400 font-bold uppercase tracking-widest text-sm mb-2">Học sinh được chọn</h2>
-            <AnimatePresence mode="wait">
-              <motion.div 
-                key={selectedStudent}
-                initial={{ scale: 0.8, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                className={`text-5xl md:text-6xl font-black text-primary drop-shadow-sm ${isSpinning ? '' : 'animate-bounce'}`}
-              >
-                {selectedStudent || "SẴN SÀNG!"}
-              </motion.div>
-            </AnimatePresence>
-          </div>
-
-          {/* Question Box */}
-          <div className="bg-secondary/5 rounded-3xl p-6 shadow-sm border-b-8 border-secondary flex-1 flex flex-col items-center justify-center text-center">
-            <h2 className="text-gray-400 font-bold uppercase tracking-widest text-sm mb-4">Câu hỏi thử thách</h2>
-            <div className="text-xl md:text-2xl font-extrabold text-dark leading-relaxed">
-              {currentQuestion ? (
-                <>
-                  <span className="block text-secondary text-sm tracking-[0.2em] mb-2">CÂU HỎI DÀNH CHO BẠN</span>
-                  {currentQuestion}
-                </>
-              ) : (
-                <span className="text-gray-400 font-medium">Nhấn nút "QUAY" để xem ai là người may mắn!</span>
-              )}
+        {/* Right: Info Area (5 cols) */}
+        <div className="lg:col-span-5 flex flex-col bg-white/10">
+          {/* Result Card */}
+          <div className="p-8 border-b border-white/10">
+            <div className="glass-card rounded-[32px] p-8 text-center relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-primary" />
+              <h2 className="text-dark/40 font-black uppercase tracking-[0.3em] text-[10px] mb-4">Học sinh được chọn</h2>
+              <AnimatePresence mode="wait">
+                <motion.div 
+                  key={selectedStudent}
+                  initial={{ scale: 0.8, opacity: 0, y: 20 }}
+                  animate={{ scale: 1, opacity: 1, y: 0 }}
+                  className={`text-6xl font-black text-primary drop-shadow-sm ${isSpinning ? 'animate-pulse' : ''}`}
+                >
+                  {selectedStudent || "SẴN SÀNG"}
+                </motion.div>
+              </AnimatePresence>
             </div>
           </div>
 
-          {/* Student List Box */}
-          <div className="bg-accent/5 rounded-3xl p-6 shadow-sm border-b-8 border-accent flex-[1.5] flex flex-col overflow-hidden">
-            <div className="flex justify-between items-center mb-4 border-b-2 border-dashed border-gray-100 pb-4">
-              <h3 className="text-xl font-bold text-accent">DANH SÁCH LỚP</h3>
-              <span className="bg-accent text-white px-3 py-1 rounded-full text-sm font-bold">
-                {remainingStudents.length} / {allStudents.length}
-              </span>
+          {/* Question Card */}
+          <div className="p-8 border-b border-white/10 flex-1 flex flex-col">
+            <div className="glass-card rounded-[32px] p-8 text-center flex-1 flex flex-col justify-center relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-secondary" />
+              <h2 className="text-dark/40 font-black uppercase tracking-[0.3em] text-[10px] mb-6">Thử thách dành cho bạn</h2>
+              <div className="text-2xl font-black text-dark leading-tight">
+                {currentQuestion ? (
+                  <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+                    {currentQuestion}
+                  </motion.p>
+                ) : (
+                  <p className="text-dark/20 italic font-bold">Nhấn QUAY để bắt đầu thử thách!</p>
+                )}
+              </div>
             </div>
+          </div>
 
-            <div className="flex gap-2 mb-4">
-              <input 
-                type="text" 
-                value={quickAdd}
-                onChange={(e) => setQuickAdd(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
-                placeholder="Thêm nhanh học sinh..."
-                className="flex-1 bg-white border-2 border-gray-100 rounded-xl px-4 py-2 focus:outline-none focus:border-secondary transition-all font-semibold"
-              />
+          {/* History & List Tabs */}
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="flex px-8 gap-2 mb-4">
               <button 
-                onClick={handleQuickAdd}
-                className="bg-success text-white p-2 rounded-xl shadow-[0_4px_0_#27ae60] active:translate-y-1 active:shadow-none transition-all"
+                onClick={() => setActiveTab('students')}
+                className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${activeTab === 'students' ? 'bg-primary text-white shadow-lg shadow-primary/20' : 'bg-white/20 text-dark/40 hover:bg-white/40'}`}
               >
-                <Plus className="w-6 h-6" />
+                Danh sách
+              </button>
+              <button 
+                onClick={() => setActiveTab('manual')}
+                className={`flex-1 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${activeTab === 'manual' ? 'bg-secondary text-white shadow-lg shadow-secondary/20' : 'bg-white/20 text-dark/40 hover:bg-white/40'}`}
+              >
+                Lịch sử
               </button>
             </div>
 
-            <div className="flex flex-wrap gap-2 overflow-y-auto pr-2 custom-scrollbar">
-              {allStudents.map((name) => (
-                <span 
-                  key={name}
-                  className={`px-4 py-1.5 rounded-full font-extrabold text-sm border-2 transition-all ${
-                    remainingStudents.includes(name) 
-                    ? 'bg-white border-gray-100 shadow-[0_4px_0_#f3f4f6] hover:-translate-y-1 hover:border-secondary hover:shadow-[0_4px_0_#4ECDC4]' 
-                    : 'bg-gray-100 border-transparent text-gray-400 line-through opacity-60 translate-y-1'
-                  }`}
-                >
-                  {name}
-                </span>
-              ))}
+            <div className="flex-1 overflow-hidden px-8 pb-8">
+              <div className="glass-card rounded-[32px] h-full flex flex-col overflow-hidden">
+                {activeTab === 'students' ? (
+                  <div className="flex flex-col h-full">
+                    <div className="p-6 border-b border-white/10 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Users className="w-4 h-4 text-primary" />
+                        <span className="font-black text-xs uppercase tracking-widest text-dark/60">Sĩ số lớp</span>
+                      </div>
+                      <span className="bg-primary/10 text-primary px-3 py-1 rounded-lg text-[10px] font-black">
+                        {remainingStudents.length} / {allStudents.length}
+                      </span>
+                    </div>
+                    <div className="p-4 flex gap-2">
+                      <input 
+                        type="text" 
+                        value={quickAdd}
+                        onChange={(e) => setQuickAdd(e.target.value)}
+                        onKeyPress={(e) => e.key === 'Enter' && handleQuickAdd()}
+                        placeholder="Thêm nhanh..."
+                        className="flex-1 bg-white/40 border border-white/60 rounded-xl px-4 py-2 text-xs font-bold outline-none focus:border-primary transition-all"
+                      />
+                      <button onClick={handleQuickAdd} className="bg-success text-white p-2 rounded-xl shadow-md active:scale-95">
+                        <Plus className="w-5 h-5" />
+                      </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                      <div className="flex flex-wrap gap-2">
+                        {allStudents.map((name) => (
+                          <motion.span 
+                            key={name}
+                            layout
+                            className={`px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-wider border transition-all ${
+                              remainingStudents.includes(name) 
+                              ? 'bg-white border-white shadow-sm text-dark/70' 
+                              : 'bg-dark/5 border-transparent text-dark/20 line-through'
+                            }`}
+                          >
+                            {name}
+                          </motion.span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col h-full">
+                    <div className="p-6 border-b border-white/10 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <History className="w-4 h-4 text-secondary" />
+                        <span className="font-black text-xs uppercase tracking-widest text-dark/60">Lịch sử quay</span>
+                      </div>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                      <div className="space-y-2">
+                        {history.length > 0 ? (
+                          [...history].reverse().map((item, i) => (
+                            <motion.div 
+                              initial={{ opacity: 0, x: 20 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              key={`${item.name}-${i}`}
+                              className="bg-white/40 p-3 rounded-2xl border border-white/60 flex items-center justify-between"
+                            >
+                              <div className="flex items-center gap-3">
+                                <span className="w-6 h-6 bg-secondary/20 rounded-lg flex items-center justify-center text-[10px] font-black text-secondary">
+                                  {history.length - i}
+                                </span>
+                                <span className="font-black text-xs text-dark/70 uppercase tracking-wider">{item.name}</span>
+                              </div>
+                              <span className="text-[8px] font-black text-dark/20 uppercase">Đã chọn</span>
+                            </motion.div>
+                          ))
+                        ) : (
+                          <div className="h-full flex flex-col items-center justify-center text-dark/20 py-12">
+                            <History className="w-12 h-12 mb-4 opacity-20" />
+                            <p className="font-black text-xs uppercase tracking-widest">Chưa có dữ liệu</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Winner Modal */}
+      <AnimatePresence>
+        {showWinnerModal && winnerInfo && (
+          <div className="fixed inset-0 z-[200] bg-dark/90 backdrop-blur-md flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.5, y: 100 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.5, y: 100 }}
+              className="bg-white w-full max-w-lg rounded-[48px] p-10 text-center relative overflow-hidden shadow-[0_0_100px_rgba(255,255,255,0.2)]"
+            >
+              {/* Decorative elements */}
+              <div className="absolute top-0 left-0 w-full h-4 bg-gradient-to-r from-primary via-secondary to-accent" />
+              <div className="absolute -top-24 -left-24 w-48 h-48 bg-primary/10 rounded-full blur-3xl" />
+              <div className="absolute -bottom-24 -right-24 w-48 h-48 bg-secondary/10 rounded-full blur-3xl" />
+
+              <motion.div 
+                animate={{ rotate: [0, 10, -10, 0] }}
+                transition={{ repeat: Infinity, duration: 2 }}
+                className="w-24 h-24 bg-warning/20 rounded-full flex items-center justify-center mx-auto mb-8"
+              >
+                <Trophy className="w-12 h-12 text-warning" />
+              </motion.div>
+
+              <h2 className="text-2xl font-bold text-gray-400 uppercase tracking-[0.3em] mb-2">CHÚC MỪNG</h2>
+              <h3 className="text-5xl md:text-6xl font-black text-primary mb-8 drop-shadow-sm">
+                {winnerInfo.name}
+              </h3>
+
+              <div className="bg-gray-50 rounded-3xl p-8 mb-10 border-2 border-dashed border-gray-200 relative">
+                <span className="absolute -top-4 left-1/2 -translate-x-1/2 bg-white px-4 py-1 rounded-full border-2 border-gray-100 text-xs font-black text-gray-400 uppercase tracking-widest">
+                  THỬ THÁCH
+                </span>
+                <p className="text-xl md:text-2xl font-extrabold text-dark leading-relaxed">
+                  {winnerInfo.question}
+                </p>
+              </div>
+
+              <button 
+                onClick={() => setShowWinnerModal(false)}
+                className="w-full bg-success text-white py-5 rounded-2xl font-black text-xl shadow-[0_8px_0_#27ae60] active:translate-y-1 active:shadow-none transition-all hover:brightness-110"
+              >
+                TIẾP TỤC
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Admin Modal */}
       <AnimatePresence>
@@ -887,6 +1140,50 @@ function GameContent() {
                     <p className="text-4xl font-black text-secondary">Online</p>
                   </div>
                 </div>
+
+                {viewingUserData && (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mb-8 p-6 bg-secondary/5 rounded-3xl border-2 border-secondary/20 relative"
+                  >
+                    <button 
+                      onClick={() => setViewingUserData(null)}
+                      className="absolute top-4 right-4 p-2 hover:bg-secondary/10 rounded-full transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                    <h3 className="text-xl font-bold text-secondary mb-4 flex items-center gap-2">
+                      <Eye className="w-5 h-5" /> Dữ liệu người dùng
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="space-y-2">
+                        <p className="text-xs font-black text-dark/40 uppercase tracking-widest">Học sinh</p>
+                        <div className="flex flex-wrap gap-2">
+                          {viewingUserData.students?.length > 0 ? (
+                            viewingUserData.students.map((s: string) => (
+                              <span key={s} className="px-3 py-1 bg-white rounded-lg text-xs font-bold border border-secondary/20">{s}</span>
+                            ))
+                          ) : (
+                            <span className="text-dark/20 italic text-xs">Trống</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <p className="text-xs font-black text-dark/40 uppercase tracking-widest">Câu hỏi</p>
+                        <ul className="space-y-1">
+                          {viewingUserData.questions?.length > 0 ? (
+                            viewingUserData.questions.map((q: string, i: number) => (
+                              <li key={i} className="text-xs font-bold text-dark/70 list-disc ml-4">{q}</li>
+                            ))
+                          ) : (
+                            <li className="text-dark/20 italic text-xs">Trống</li>
+                          )}
+                        </ul>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
 
                 <div className="mb-6 relative">
                   <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 w-5 h-5" />
@@ -942,6 +1239,20 @@ function GameContent() {
                             </td>
                             <td className="px-6 py-4">
                               <div className="flex items-center gap-2">
+                                <button 
+                                  onClick={() => fetchUserGameData(u.id)}
+                                  className="p-2 text-secondary hover:bg-secondary/10 rounded-lg transition-colors"
+                                  title="Xem dữ liệu"
+                                >
+                                  <Eye className="w-5 h-5" />
+                                </button>
+                                <button 
+                                  onClick={() => resetUserPassword(u.email)}
+                                  className="p-2 text-warning hover:bg-warning/10 rounded-lg transition-colors"
+                                  title="Khôi phục mật khẩu"
+                                >
+                                  <Lock className="w-5 h-5" />
+                                </button>
                                 <button 
                                   onClick={() => deleteUserGameData(u.id)}
                                   className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"

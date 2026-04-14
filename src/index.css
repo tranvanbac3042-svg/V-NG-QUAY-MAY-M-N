@@ -12,30 +12,68 @@
   --color-accent: #9D4EDD;
   --color-dark: #2B2D42;
   --color-light: #F8F9FA;
+
+  --shadow-premium: 0 20px 50px rgba(0, 0, 0, 0.1);
+  --glass-bg: rgba(255, 255, 255, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.4);
 }
 
 body {
-  @apply font-nunito text-dark bg-fixed;
-  background: linear-gradient(45deg, #a8edea 0%, #fed6e3 100%);
-  background-size: 400% 400%;
-  animation: gradientBG 15s ease infinite;
+  @apply font-nunito text-dark bg-fixed antialiased;
+  background: radial-gradient(circle at top left, #a8edea 0%, #fed6e3 100%);
+  background-attachment: fixed;
 }
 
-@keyframes gradientBG {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+.glass-panel {
+  @apply bg-white/70 backdrop-blur-2xl border border-white/40 shadow-premium;
+}
+
+.glass-card {
+  @apply bg-white/40 backdrop-blur-lg border border-white/30 shadow-sm;
+}
+
+.btn-premium {
+  @apply relative overflow-hidden transition-all duration-300 active:scale-95 disabled:opacity-50 disabled:pointer-events-none;
+}
+
+.btn-premium::after {
+  content: '';
+  @apply absolute inset-0 bg-white/20 opacity-0 transition-opacity duration-300;
+}
+
+.btn-premium:hover::after {
+  @apply opacity-100;
 }
 
 h1, h2, h3 {
-  @apply font-baloo;
+  @apply font-baloo tracking-tight;
 }
 
-.lucide-spin {
-  animation: spin 1s linear infinite;
+.wheel-glow {
+  box-shadow: 0 0 50px rgba(255, 230, 109, 0.3);
 }
 
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  @apply bg-dark/10 rounded-full;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  @apply bg-dark/20;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
 }
