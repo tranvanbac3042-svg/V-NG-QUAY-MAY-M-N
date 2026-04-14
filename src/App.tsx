@@ -181,6 +181,18 @@ function GameContent() {
     return () => subscription.unsubscribe();
   }, []);
 
+  const signInAnonymously = async () => {
+    setLoading(true);
+    try {
+      const { error } = await supabase.auth.signInAnonymously();
+      if (error) throw error;
+    } catch (error: any) {
+      setAuthError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const fetchUserProfile = async (userId: string) => {
     try {
       const { data, error } = await supabase
@@ -706,6 +718,20 @@ function GameContent() {
               {loading ? <Loader2 className="w-6 h-6 animate-spin" /> : (authMode === 'login' ? 'ĐĂNG NHẬP' : 'ĐĂNG KÝ')}
             </button>
           </form>
+
+          <div className="relative mb-8">
+            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>
+            <div className="relative flex justify-center text-[10px]"><span className="px-4 bg-[#0a0a0a] text-white/20 font-black tracking-widest uppercase">Hoặc đơn giản hơn</span></div>
+          </div>
+
+          <button 
+            onClick={signInAnonymously}
+            disabled={loading}
+            className="w-full flex items-center justify-center gap-3 bg-secondary text-white py-4 rounded-2xl font-black text-lg hover:brightness-110 transition-all shadow-xl shadow-secondary/20 active:scale-[0.98] mb-8"
+          >
+            <Zap className="w-6 h-6" />
+            VÀO CHƠI NHANH (KHÔNG CẦN TK)
+          </button>
 
           <p className="text-center font-bold text-white/30 text-sm">
             {authMode === 'login' ? 'Chưa có tài khoản?' : 'Đã có tài khoản?'}
